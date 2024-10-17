@@ -183,7 +183,7 @@ if __name__ == "__main__":
     # Main loop:
     rate = rospy.Rate(30) # 30hz
     prev_cTr = None
-    use_particle_filter = True
+    use_particle_filter = False
     while not rospy.is_shutdown():
         try:
             if new_data:
@@ -196,6 +196,10 @@ if __name__ == "__main__":
                 # new_joint_confidence = torch.clone(joint_confidence)
                 new_data = False
 
+                if skipped == True:
+                    skipped = False
+                    continue
+                
                 if use_particle_filter == False:
                     print("PARTICLE FILTER TURNED OFF")
                     # pred_qua = kornia.geometry.conversions.angle_axis_to_quaternion(cTr[:,:3]).detach().cpu() # xyzw
@@ -214,9 +218,7 @@ if __name__ == "__main__":
                 # if num_joint_confident < joint_confident_thresh:
                 #     print(f"Only confident with {num_joint_confident} joints, skipping...")
                 #     continue
-                if skipped == True:
-                    skipped = False
-                    continue
+
                 # Predict Particle filter
                 pred_std = np.array([1.0e-4, 1.0e-4, 1.0e-4, 1.0e-4,
                                     2.5e-5, 2.5e-5, 2.5e-5])
