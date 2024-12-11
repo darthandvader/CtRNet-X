@@ -31,7 +31,7 @@ from ros_nodes.particle_filter import *
 from ros_nodes.probability_funcs import *
 #os.environ['ROS_MASTER_URI']='http://192.168.1.116:11311'
 #os.environ['ROS_IP']='192.168.1.186'
-
+from CLIP_forward import CLIP_LoRA
 ################################################################
 import argparse
 parser = argparse.ArgumentParser()
@@ -44,7 +44,7 @@ args.data_folder = "" # your local base directory
 
 args.use_gpu = True
 args.trained_on_multi_gpus = True
-args.keypoint_seg_model_path = os.path.join(args.base_dir,"weights/net_epoch_260.pth")
+args.keypoint_seg_model_path = os.path.join(args.base_dir,"weights/net_best.pth")
 args.urdf_file = os.path.join(args.base_dir,"urdfs/Panda/panda.urdf")
 args.robot_name = 'Panda' # "Panda" or "Baxter_left_arm"
 args.n_kp = 12
@@ -82,7 +82,7 @@ def preprocess_img(cv_img,args):
     new_size = (int(width*args.scale),int(height*args.scale))
     image_pil = image_pil.resize(new_size)
     image = trans_to_tensor(image_pil)
-    return image
+    return image, image_pil
 
 
 #############################################################################3
@@ -93,6 +93,13 @@ points_2d = None
 joint_angles = None
 cTr = None
 skipped = False
+# e_weight_path = 'CLIP_logs/vitb16/robotgripper_test/32shots/seed1/lora_weights.pt'
+e_weight_path = 'CLIP_logs/tune_ee/75shots/seed1/lora_weights.pt'
+# b_weight_path = 'CLIP_logs/vitb16/robotbase_test/32shots/seed1/lora_weights.pt'
+b_weight_path = 'CLIP_logs/tune_base/50shots/seed1/lora_weights.pt'
+e_caps = ["a photo without robot end-effector", "a photo of robot end-effector"]
+b_caps = ["a photo without robot base", "a photo of robot base"] 
+CLIP_model = CLIP_LoRA(e_weight_path, b_weight_path)
 def gotData(img_msg, joint_msg):
     #global start
     global new_data, points_2d, joint_angles, cTr, skipped
@@ -101,17 +108,29 @@ def gotData(img_msg, joint_msg):
         # Convert your ROS Image message to OpenCV2
         cv2_img = bridge.imgmsg_to_cv2(img_msg, "bgr8")
         cv_img = cv2.cvtColor(cv2_img, cv2.COLOR_BGR2RGB)
-        image = preprocess_img(cv_img,args)
+        image, image_pil = preprocess_img(cv_img,args)
 
         joint_angles = np.array(joint_msg.position)[[0,1,2,3,4,5,6]]
 
         points_2d, points_3d, confidence = CtRNet.inference_keypoints_dark(image, joint_angles)
+        # CLIP classification:
+        # clip_img_path = os.path.join(frame_dir, frame_file)
+        e_filter_confidence = 0.1
+        b_filter_confidence = 0.05   
+
+        classification_result = CLIP_model(image_pil, e_caps, b_caps, from_file=False)
+        if CLIP_model.e_probs.squeeze()[0] >= e_filter_confidence:    # filtering
+            classification_result["end-effector"] = False
+        if CLIP_model.b_probs.squeeze()[0] >= b_filter_confidence:
+            classification_result["base"] = False
+        
+        print(classification_result)
         confidence_threshold = args.confidence_threshold
         confidence_mask = confidence > confidence_threshold
         filtered_points_2d = points_2d[confidence_mask].unsqueeze(0)
         filtered_points_3d = points_3d[confidence_mask.squeeze(0)]
 
-        num_confident_thresh = 6
+        num_confident_thresh = 5
         num_confident = filtered_points_3d.shape[0]
         if num_confident < num_confident_thresh:
             skipped = True
@@ -136,7 +155,8 @@ def update_publisher(cTr, quaternion=True):
     # ROS camera to CV camera transform
     cTcv = np.array([[0, 0 , 1, 0], [-1, 0, 0 , 0], [0, -1, 0, 0], [0, 0, 0, 1]])
     T = cTcv@cvTr
-    qua = t3d.quaternions.mat2quat(T[:3, :3]) # wxyz
+    qua = kornia.geometry.conversions.rotation_matrix_to_quaternion(torch.from_numpy(T[:3, :3]).contiguous()) # xyzw
+    # qua = t3d.quaternions.mat2quat(T[:3, :3]) # wxyz
     # Publish Transform
     br = tf2_ros.TransformBroadcaster()
     t = geometry_msgs.msg.TransformStamped()
@@ -146,10 +166,10 @@ def update_publisher(cTr, quaternion=True):
     t.transform.translation.x = T[0, 3]
     t.transform.translation.y = T[1, 3]
     t.transform.translation.z = T[2, 3]
-    t.transform.rotation.x = qua[1]
-    t.transform.rotation.y = qua[2]
-    t.transform.rotation.z = qua[3]
-    t.transform.rotation.w = qua[0]
+    t.transform.rotation.x = qua[0]
+    t.transform.rotation.y = qua[1]
+    t.transform.rotation.z = qua[2]
+    t.transform.rotation.w = qua[3]
     br.sendTransform(t)
 
 if __name__ == "__main__":
@@ -176,14 +196,14 @@ if __name__ == "__main__":
                         init_distribution=sample_gaussian,
                         motion_model=additive_gaussian,
                         obs_model=point_feature_obs,
-                        num_particles=2500)
+                        num_particles=10000)
     pf.init_filter(init_std)
     rospy.loginfo("Initailized particle filter")
 
     # Main loop:
     rate = rospy.Rate(30) # 30hz
     prev_cTr = None
-    use_particle_filter = False
+    use_particle_filter = True
     while not rospy.is_shutdown():
         try:
             if new_data:
@@ -220,8 +240,10 @@ if __name__ == "__main__":
                 #     continue
 
                 # Predict Particle filter
+                # pred_std = np.array([1.0e-4, 1.0e-4, 1.0e-4, 1.0e-4,
+                #                     2.5e-5, 2.5e-5, 2.5e-5])
                 pred_std = np.array([1.0e-4, 1.0e-4, 1.0e-4, 1.0e-4,
-                                    2.5e-5, 2.5e-5, 2.5e-5])
+                                    1.0e-4, 1.0e-4, 1.0e-4])
 
                 pf.predict(pred_std)
 

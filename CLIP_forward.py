@@ -32,11 +32,13 @@ class CLIP_LoRA(nn.Module):
         self.model_e.to(self.device)
         self.model_b.to(self.device)
         
-    def forward(self, img_path, e_captions, b_captions):
+    def forward(self, img, e_captions, b_captions, from_file=True):
         e_text = clip.tokenize(e_captions).to(self.device)
         b_text = clip.tokenize(b_captions).to(self.device)
-        image = self.preprocess(Image.open(img_path)).unsqueeze(0).to(self.device)
-        
+        if from_file:
+            image = self.preprocess(Image.open(img)).unsqueeze(0).to(self.device)
+        else:
+            image = self.preprocess(img).unsqueeze(0).to(self.device)
         results = {"end-effector": False, "base": False}
         
         with torch.no_grad():
