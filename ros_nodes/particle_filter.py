@@ -27,8 +27,8 @@ class ParticleFilter:
         self._particles = self._motion_model(self._particles, tiled_std)
 
 
-    def update(self, points_2d, ctrnet, joint_angles, cam, cTr, gamma):
-        obs_probs = self._obs_model(self._particles, points_2d, ctrnet, joint_angles, cam, cTr, gamma)
+    def update(self, points_2d, ctrnet, joint_angles, cam, cTr, gamma, class_result):
+        obs_probs = self._obs_model(self._particles, points_2d, ctrnet, joint_angles, cam, cTr, gamma, class_result)
         self._weights = self._weights*obs_probs[:, 0]
         min_weight = 1e-50
         self._weights = np.maximum(self._weights, min_weight)

@@ -49,7 +49,8 @@ def projectPoints(points, K):
     
     return projected_point
 # State is: [ori_x, ori_y, ori_z, pos_x, pos_y, pos_z]
-def point_feature_obs(states, points_2d, ctrnet, joint_angles, cam, cTr, gamma):
+def point_feature_obs(states, points_2d, ctrnet, joint_angles, cam, cTr, gamma, class_result):
+    print(points_2d.shape)
     #convert state to angle axis
     num_particles = states.shape[0]
     T = np.eye(4)
@@ -97,9 +98,20 @@ def point_feature_obs(states, points_2d, ctrnet, joint_angles, cam, cTr, gamma):
     # print(projected_points_cv2)
 
     # Make association between detected and projected points to compute prob and use prob to update weights
-    projected_points = projected_points.reshape(num_particles, 24)
+    num_points = 12
+    if class_result["end-effector"] == True and class_result["base"] == True:
+        points_2d = points_2d
+    elif class_result["end-effector"] == True and class_result["base"] == False:
+        projected_points = projected_points[:, 6:, :]
+        num_points = 6
+    elif class_result["end-effector"] == False and class_result["base"] == True:
+        projected_points = projected_points[:, 6:, :]
+        num_points = 6
+    
+    projected_points = projected_points.reshape(num_particles, num_points*2)
     detected_points =  points_2d.cpu().detach().numpy()
-    detected_points = np.reshape(np.tile(detected_points, (num_particles, 1, 1)), (num_particles, 24))
+    print(detected_points.shape)
+    detected_points = np.reshape(np.tile(detected_points, (num_particles, 1, 1)), (num_particles, num_points*2))
     # print(projected_points, detected_points)
     # TODO Fix NaN problem
     if np.any(np.isnan(projected_points)) or np.any(np.isnan(detected_points)):

@@ -39,7 +39,7 @@ parser = argparse.ArgumentParser()
 args = parser.parse_args("")
 
 args.base_dir = "/home/workspace/src/CtRNet-X/"
-args.confidence_threshold = 0.45
+args.confidence_threshold = 0.1
 args.data_folder = "" # your local base directory
 
 args.use_gpu = True
@@ -99,10 +99,11 @@ e_weight_path = 'CLIP_logs/tune_ee/75shots/seed1/lora_weights.pt'
 b_weight_path = 'CLIP_logs/tune_base/50shots/seed1/lora_weights.pt'
 e_caps = ["a photo without robot end-effector", "a photo of robot end-effector"]
 b_caps = ["a photo without robot base", "a photo of robot base"] 
+classification_result = None
 CLIP_model = CLIP_LoRA(e_weight_path, b_weight_path)
 def gotData(img_msg, joint_msg):
     #global start
-    global new_data, points_2d, joint_angles, cTr, skipped
+    global new_data, points_2d, joint_angles, cTr, skipped, classification_result
     print("Received data!")
     try:
         # Convert your ROS Image message to OpenCV2
@@ -111,8 +112,6 @@ def gotData(img_msg, joint_msg):
         image, image_pil = preprocess_img(cv_img,args)
 
         joint_angles = np.array(joint_msg.position)[[0,1,2,3,4,5,6]]
-
-        points_2d, points_3d, confidence = CtRNet.inference_keypoints_dark(image, joint_angles)
         # CLIP classification:
         # clip_img_path = os.path.join(frame_dir, frame_file)
         e_filter_confidence = 0.1
@@ -123,20 +122,50 @@ def gotData(img_msg, joint_msg):
             classification_result["end-effector"] = False
         if CLIP_model.b_probs.squeeze()[0] >= b_filter_confidence:
             classification_result["base"] = False
-        
+
         print(classification_result)
         confidence_threshold = args.confidence_threshold
-        confidence_mask = confidence > confidence_threshold
-        filtered_points_2d = points_2d[confidence_mask].unsqueeze(0)
-        filtered_points_3d = points_3d[confidence_mask.squeeze(0)]
+        with torch.no_grad():
+            points_2d, points_3d, confidence = CtRNet.inference_keypoints_dark(image, joint_angles)
+            
+            if classification_result["end-effector"] == True and classification_result["base"] == True:
+                points_2d = points_2d
+                points_3d = points_3d     
+            elif classification_result["end-effector"] == True and classification_result["base"] == False:
+                points_2d = points_2d[:, 6:, :]
+                points_3d = points_3d[6:]  
+            elif classification_result["end-effector"] == False and classification_result["base"] == True:
+                points_2d = points_2d[:, :6, :]
+                points_3d = points_3d[:6]
+            else:
+                skipped = True
+                print("Both base and end effector not visible")
+                return
+        filtered_points_2d = []
+        filtered_points_3d = []
+        for i in range(len(points_2d)):
+            for j in range(len(points_2d[i])):
+                if confidence[i][j] > confidence_threshold:
+                    filtered_points_2d.append(points_2d[i][j])
+                    filtered_points_3d.append(points_3d[j])
+        # confidence_mask = confidence > confidence_threshold
+        # filtered_points_2d = points_2d[confidence_mask].unsqueeze(0)
+        # filtered_points_3d = points_3d[confidence_mask.squeeze(0)]
 
-        num_confident_thresh = 5
-        num_confident = filtered_points_3d.shape[0]
-        if num_confident < num_confident_thresh:
+        # num_confident_thresh = 5
+        # num_confident = filtered_points_3d.shape[0]
+        # if num_confident < num_confident_thresh:
+        #     skipped = True
+        #     print(f"Only {num_confident} points are over {confidence_threshold} confident, skipped!")
+        #     return
+        if len(filtered_points_2d) >= 5:
+            filtered_points_2d = torch.stack(filtered_points_2d).unsqueeze(0)
+            filtered_points_3d = torch.stack(filtered_points_3d)
+            cTr = CtRNet.bpnp(filtered_points_2d, filtered_points_3d, CtRNet.K)
+        else:
             skipped = True
-            print(f"Only {num_confident} points are over {confidence_threshold} confident, skipped!")
+            print(f"Only {len(filtered_points_2d)} points are confident, skipped!")
             return
-        cTr = CtRNet.bpnp(filtered_points_2d, filtered_points_3d, CtRNet.K)
         # cTr, points_2d, segmentation = CtRNet.inference_single_image(image, joint_angles)
         #cTb = CtRNet.bpnp(CtRNet.points_2d_pred, CtRNet.points_3d, CtRNet.K).detach().cpu()
 
@@ -212,6 +241,8 @@ if __name__ == "__main__":
                 # new_image = torch.copy(image)
                 new_joint_angles = np.copy(joint_angles)
                 new_points_2d = torch.clone(points_2d)
+                new_classification_result = classification_result
+
                 new_cTr = torch.clone(cTr)
                 # new_joint_confidence = torch.clone(joint_confidence)
                 new_data = False
@@ -250,7 +281,7 @@ if __name__ == "__main__":
                 # Update Particle filter
                 cam = None
                 gamma = 0.15
-                pf.update(new_points_2d, CtRNet, new_joint_angles, cam, prev_cTr, gamma)
+                pf.update(new_points_2d, CtRNet, new_joint_angles, cam, prev_cTr, gamma, new_classification_result)
 
                 mean_particle = pf.get_mean_particle()
                 mean_particle_r = torch.from_numpy(mean_particle[:4])
